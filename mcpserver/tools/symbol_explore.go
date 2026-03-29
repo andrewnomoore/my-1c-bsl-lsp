@@ -125,32 +125,47 @@ PARAMETERS: query (required), file_context (optional), detail_level (auto/basic/
 
 // performSymbolSearch executes workspace symbol search across multiple languages asynchronously
 // This function:
-// 1. Detects all programming languages in the project
+// 1. Uses already-connected language clients (fast path) or detects languages from filesystem
 // 2. Searches for symbols in parallel across all detected languages
 // 3. Aggregates results into a unified list of SymbolMatch objects
 // The async approach significantly improves performance for multi-language projects
 func performSymbolSearch(ctx context.Context, bridge interfaces.BridgeInterface, query string) ([]SymbolMatch, error) {
-	// Use WORKSPACE_ROOT from environment (set in container mode)
-	// Fallback to current working directory if not set
-	projectDir := os.Getenv("WORKSPACE_ROOT")
-	if projectDir == "" {
+	// Fast path: use already-connected language clients to avoid expensive filesystem scan.
+	languages := bridge.GetConnectedLanguages()
+
+	// Fallback: detect languages from project files if no clients connected yet.
+	if len(languages) == 0 {
+		projectDir := os.Getenv("WORKSPACE_ROOT")
+		if projectDir == "" {
+			var err error
+			projectDir, err = os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get current working directory: %w", err)
+			}
+		}
+
+		logger.Info(fmt.Sprintf("symbol_explore: no connected languages, detecting from project: %s", projectDir))
+
 		var err error
-		projectDir, err = os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current working directory: %w", err)
+		languages, err = bridge.DetectProjectLanguages(projectDir)
+		if err != nil {
+			logger.Warn(fmt.Sprintf("symbol_explore: filesystem detection failed: %v, trying SearchTextInAllLanguages", err))
 		}
 	}
-	
-	logger.Info(fmt.Sprintf("symbol_explore: using project directory: %s", projectDir))
 
-	// First detect all project languages from the project directory
-	languages, err := bridge.DetectProjectLanguages(projectDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to detect project languages: %w", err)
-	}
-
+	// If we still have no languages, fall back to searching all connected clients directly.
 	if len(languages) == 0 {
-		return nil, errors.New("no languages detected in project directory")
+		logger.Info("symbol_explore: no languages detected, using SearchTextInAllLanguages fallback")
+		symbols, err := bridge.SearchTextInAllLanguages(query)
+		if err != nil {
+			return nil, fmt.Errorf("symbol search failed: %w", err)
+		}
+		allMatches := make([]SymbolMatch, 0, len(symbols))
+		for _, symbol := range symbols {
+			allMatches = append(allMatches, convertWorkspaceSymbolToMatch(symbol))
+		}
+		logger.Info(fmt.Sprintf("Found %d total symbols via all-languages fallback", len(allMatches)))
+		return allMatches, nil
 	}
 
 	logger.Info(fmt.Sprintf("Searching symbols across %d languages: %v", len(languages), languages))

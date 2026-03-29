@@ -29,6 +29,12 @@ services:
       FILE_WATCHER_MODE: ${FILE_WATCHER_MODE:-polling}
       FILE_WATCHER_INTERVAL: ${FILE_WATCHER_INTERVAL:-30s}
       FILE_WATCHER_WORKERS: ${FILE_WATCHER_WORKERS:-8}
+      # MCP transport: stdio (default, via docker exec) or http (Streamable HTTP on port)
+      MCP_TRANSPORT: ${MCP_TRANSPORT:-stdio}
+      MCP_HTTP_PORT: ${MCP_HTTP_PORT:-8080}
+
+    ports:
+      - "${MCP_HTTP_PORT:-8080}:${MCP_HTTP_PORT:-8080}"
 
     volumes:
       - "${HOST_PROJECTS_ROOT}:${PROJECTS_ROOT:-/projects}:${PROJECTS_MOUNT_MODE:-ro}"

@@ -1,0 +1,32 @@
+#!/bin/sh
+exec 2>&1
+
+# Only start if MCP_TRANSPORT is set to "http"
+if [ "${MCP_TRANSPORT}" != "http" ]; then
+    echo "MCP_TRANSPORT is not 'http', skipping mcp-bridge-http service."
+    # Exit with 0 and sleep to prevent s6 restart loop
+    exec sleep infinity
+fi
+
+echo "Starting MCP-LSP Bridge in HTTP mode on port ${MCP_HTTP_PORT:-8080}..."
+
+# Give BSL LS a few seconds to start, but don't block forever —
+# the bridge handles missing LSP connections gracefully.
+BSL_PORT=${BSL_LS_PORT:-9999}
+echo "Waiting up to 30s for BSL Language Server on port ${BSL_PORT}..."
+TRIES=0
+while [ "$TRIES" -lt 30 ] && ! nc -z localhost "${BSL_PORT}" 2>/dev/null; do
+    TRIES=$((TRIES + 1))
+    sleep 1
+done
+
+if nc -z localhost "${BSL_PORT}" 2>/dev/null; then
+    echo "BSL Language Server is ready."
+else
+    echo "BSL Language Server not available yet, starting MCP bridge anyway."
+fi
+
+exec /usr/bin/mcp-lsp-bridge \
+    --transport http \
+    --port "${MCP_HTTP_PORT:-8080}" \
+    --log-level "${MCP_LSP_LOG_LEVEL:-debug}"

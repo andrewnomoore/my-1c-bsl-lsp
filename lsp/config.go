@@ -252,6 +252,11 @@ func (c LSPServerConfig) GetLanguageServers() map[types.LanguageServer]types.Lan
 	return result
 }
 
+// GetLanguageServerMap returns the server→languages mapping.
+func (c LSPServerConfig) GetLanguageServerMap() map[types.LanguageServer][]types.Language {
+	return c.LanguageServerMap
+}
+
 // GetServerNameFromLanguage returns the server name for a given language
 func (c LSPServerConfig) GetServerNameFromLanguage(language types.Language) types.LanguageServer {
 	for serverName, supportedLanguages := range c.LanguageServerMap {

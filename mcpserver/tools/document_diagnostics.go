@@ -16,14 +16,15 @@ import (
 
 func DocumentDiagnosticsTool(bridge interfaces.BridgeInterface) (mcp.Tool, server.ToolHandlerFunc) {
 	return mcp.NewTool("document_diagnostics",
-			mcp.WithDescription(`Get diagnostics for a specific document using LSP 3.17+ textDocument/diagnostic method. EXCELLENT for identifying errors, warnings, and issues in individual files - provides more targeted results than workspace diagnostics.
+			mcp.WithDescription(`Get diagnostics (errors, warnings) for a specific file via LSP textDocument/diagnostic.
 
-USAGE:
-- Basic diagnostics: uri="file://path/to/file.tsx"
-- With identifier: uri="file://path", identifier="my-id"
-- With result caching: uri="file://path", previous_result_id="abc123"
+URI FORMAT (any of these work):
+- Relative path (recommended): uri="do-extension-ame/CommonModules/МойМодуль/Ext/Module.bsl"
+- Container absolute: uri="/projects/do-extension-ame/CommonModules/МойМодуль/Ext/Module.bsl"
+- File URI: uri="file:///projects/do-extension-ame/CommonModules/МойМодуль/Ext/Module.bsl"
+- Host Windows path: uri="F:\path\to\file.bsl" (auto-mapped to container)
 
-OUTPUT: Full document diagnostic report with items, related documents, and result caching info`),
+OUTPUT: Diagnostic report grouped by severity (errors, warnings, hints)`),
 			mcp.WithDestructiveHintAnnotation(false),
 			mcp.WithString("uri", mcp.Description("URI to the file to diagnose"), mcp.Required()),
 			mcp.WithString("identifier", mcp.Description("Optional identifier for the diagnostic request")),
@@ -63,6 +64,19 @@ OUTPUT: Full document diagnostic report with items, related documents, and resul
 
 			report, err := bridgeWithDiagnostics.GetDocumentDiagnostics(uri, identifier, previousResultId)
 			if err != nil {
+				errMsg := err.Error()
+				// LSP error -32603 (Internal error) often means file not found in project workspace.
+				if strings.Contains(errMsg, "-32603") || strings.Contains(errMsg, "InternalError") || strings.Contains(errMsg, "Internal error") {
+					logger.Warn(fmt.Sprintf("document_diagnostics: LSP Internal error for %s — file likely not found in LSP workspace", uri))
+					return mcp.NewToolResultError(fmt.Sprintf(
+						"File not found in LSP project workspace: %s\n\n"+
+							"The LSP server returned Internal error (-32603). This usually means:\n"+
+							"1. The file does not exist at the path visible to the LSP server\n"+
+							"2. The file is outside the project workspace root\n"+
+							"3. The file was recently created and the LSP server hasn't indexed it yet\n\n"+
+							"Try using did_change_watched_files to notify the server about new files.",
+						uri)), nil
+				}
 				logger.Error("document_diagnostics: Request failed", err)
 				return mcp.NewToolResultError(fmt.Sprintf("document diagnostics request failed: %v", err)), nil
 			}

@@ -14,12 +14,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"rockerboo/mcp-lsp-bridge/bridge"
@@ -129,12 +132,32 @@ func main() {
 
 	var logLevel string
 
+	var transport string
+
+	var httpPort string
+
 	flag.StringVar(&confPath, "config", defaultConfigPath, "Path to LSP configuration file")
 	flag.StringVar(&confPath, "c", defaultConfigPath, "Path to LSP configuration file (short)")
 	flag.StringVar(&logPath, "log-path", "", "Path to log file (overrides config and default)")
 	flag.StringVar(&logPath, "l", "", "Path to log file (short)")
 	flag.StringVar(&logLevel, "log-level", "", "Log level: debug, info, warn, error (overrides config)")
+	flag.StringVar(&transport, "transport", "", "Transport type: stdio (default) or http")
+	flag.StringVar(&httpPort, "port", "", "HTTP server port (only used with --transport http)")
 	flag.Parse()
+
+	// Allow environment variables to set transport and port
+	if transport == "" {
+		transport = os.Getenv("MCP_TRANSPORT")
+	}
+	if transport == "" {
+		transport = "stdio"
+	}
+	if httpPort == "" {
+		httpPort = os.Getenv("MCP_HTTP_PORT")
+	}
+	if httpPort == "" {
+		httpPort = "8080"
+	}
 
 	// Validate command line arguments for security
 	if err := validateCommandLineArgs(confPath, logPath, configDir, logDir); err != nil {
@@ -252,9 +275,38 @@ func main() {
 	logger.Info("Language server connections ready.")
 
 	// Start MCP server
-	logger.Info("Starting MCP server...")
+	switch transport {
+	case "http":
+		addr := ":" + httpPort
+		logger.Info(fmt.Sprintf("Starting MCP server (HTTP transport) on %s ...", addr))
+		fmt.Fprintf(os.Stderr, "MCP HTTP server listening on %s\n", addr)
 
-	if err := server.ServeStdio(mcpServer); err != nil {
-		logger.Error("MCP server error: " + err.Error())
+		httpServer := server.NewStreamableHTTPServer(mcpServer,
+			server.WithEndpointPath("/mcp"),
+			server.WithStateLess(true),
+		)
+
+		// Graceful shutdown on SIGINT/SIGTERM
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		go func() {
+			<-sigCh
+			logger.Info("Shutting down HTTP server...")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := httpServer.Shutdown(ctx); err != nil {
+				logger.Error("HTTP server shutdown error: " + err.Error())
+			}
+		}()
+
+		if err := httpServer.Start(addr); err != nil {
+			logger.Error("MCP HTTP server error: " + err.Error())
+		}
+	default:
+		logger.Info("Starting MCP server (stdio transport)...")
+		if err := server.ServeStdio(mcpServer); err != nil {
+			logger.Error("MCP server error: " + err.Error())
+		}
 	}
 }

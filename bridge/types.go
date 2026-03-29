@@ -20,6 +20,10 @@ type MCPLSPBridge struct {
 	pathMapper         *utils.DockerPathMapper
 	mu                 sync.RWMutex
 
+	// Track documents opened via didOpen to avoid duplicate notifications.
+	openedDocuments   map[string]bool
+	openedDocumentsMu sync.RWMutex
+
 	// Auto-connect support: connect default language client(s) once, lazily.
 	autoConnectMu          sync.Mutex
 	autoConnectStartedAt   time.Time
@@ -57,17 +61,80 @@ func (b *MCPLSPBridge) ListConnectedClients() map[types.LanguageServer]types.Lan
 
 // GetConnectedLanguages returns a list of languages for which clients are already connected.
 // This provides a fast path for tools that need language info without expensive filesystem scans.
+// It resolves server names to actual language identifiers by scanning extension_language_map
+// and checking which languages have matching connected servers.
 func (b *MCPLSPBridge) GetConnectedLanguages() []types.Language {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	var languages []types.Language
-	for server := range b.clients {
-		// Server key can be either a language name (e.g., "bsl") or a server name (e.g., "bsl-language-server")
-		// Try it as a language first
-		languages = append(languages, types.Language(server))
+	if b.config == nil || len(b.clients) == 0 {
+		return nil
 	}
+
+	// Collect all connected server names.
+	connectedServers := make(map[types.LanguageServer]bool, len(b.clients))
+	for serverKey := range b.clients {
+		connectedServers[serverKey] = true
+	}
+
+	// Resolve server names → language IDs by checking each known language.
+	// GetServerNameFromLanguage("bsl") → "bsl-language-server"; if that server is connected, include "bsl".
+	seen := make(map[types.Language]bool)
+	var languages []types.Language
+
+	// Try all languages referenced in language_servers config.
+	// We iterate all server configs and for each try FindAllServerConfigs with the server name as language,
+	// but that won't work. Instead, scan known file extensions to discover language IDs.
+	for _, lang := range b.getKnownLanguages() {
+		server := b.config.GetServerNameFromLanguage(lang)
+		if server != "" && connectedServers[server] {
+			if !seen[lang] {
+				seen[lang] = true
+				languages = append(languages, lang)
+			}
+		}
+	}
+
 	return languages
+}
+
+// getKnownLanguages returns all language IDs known to the config (from extension_language_map).
+func (b *MCPLSPBridge) getKnownLanguages() []types.Language {
+	// Type-assert to access LanguageServerMap for direct server→languages mapping.
+	type languageServerMapProvider interface {
+		GetLanguageServerMap() map[types.LanguageServer][]types.Language
+	}
+	if provider, ok := b.config.(languageServerMapProvider); ok {
+		seen := make(map[types.Language]bool)
+		var langs []types.Language
+		for _, languages := range provider.GetLanguageServerMap() {
+			for _, lang := range languages {
+				if !seen[lang] {
+					seen[lang] = true
+					langs = append(langs, lang)
+				}
+			}
+		}
+		return langs
+	}
+
+	// Fallback: try extension language map via type assertion.
+	type extensionMapProvider interface {
+		GetExtensionLanguageMap() map[string]types.Language
+	}
+	if provider, ok := b.config.(extensionMapProvider); ok {
+		seen := make(map[types.Language]bool)
+		var langs []types.Language
+		for _, lang := range provider.GetExtensionLanguageMap() {
+			if !seen[lang] {
+				seen[lang] = true
+				langs = append(langs, lang)
+			}
+		}
+		return langs
+	}
+
+	return nil
 }
 
 // AllClientsInSessionMode returns true if ALL connected clients use session mode.

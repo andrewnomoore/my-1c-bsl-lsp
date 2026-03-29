@@ -13,14 +13,16 @@ import (
 
 func HoverTool(bridge interfaces.BridgeInterface) (mcp.Tool, server.ToolHandlerFunc) {
 	return mcp.NewTool("hover",
-			mcp.WithDescription(`Get detailed symbol information including signatures, documentation, and type details at any cursor position. ESSENTIAL for understanding code without opening definition files - saves significant navigation time.
+			mcp.WithDescription(`Get detailed symbol information (signatures, documentation, types) at a cursor position.
 
-USAGE:
-- Symbol info: uri="file://path", line=15, character=10
-- Type details: Position cursor on variable/function name
+URI FORMAT (any of these work):
+- Relative path (recommended): uri="do-extension-ame/CommonModules/МойМодуль/Ext/Module.bsl"
+- Container absolute: uri="/projects/do-extension-ame/CommonModules/МойМодуль/Ext/Module.bsl"
+- File URI: uri="file:///projects/do-extension-ame/CommonModules/МойМодуль/Ext/Module.bsl"
+- Host Windows path: uri="F:\path\to\file.bsl" (auto-mapped to container)
 
 PARAMETERS: uri (required), line/character (required, 0-based)
-OUTPUT: Formatted documentation with code examples and pkg.go.dev links`),
+OUTPUT: Symbol documentation and type information`),
 			mcp.WithDestructiveHintAnnotation(false),
 			mcp.WithString("uri", mcp.Description("URI to the file"), mcp.Required()),
 			mcp.WithNumber("line", mcp.Description("Line number (0-based)"), mcp.Required(), mcp.Min(0)),

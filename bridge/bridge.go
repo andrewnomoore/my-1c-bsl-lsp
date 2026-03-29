@@ -27,6 +27,7 @@ func NewMCPLSPBridge(config types.LSPServerConfigProvider, allowedDirectories []
 		clients:            make(map[types.LanguageServer]types.LanguageClientInterface),
 		config:             config,
 		allowedDirectories: allowedDirectories,
+		openedDocuments:    make(map[string]bool),
 	}
 
 	// Попытаться создать path mapper из переменных окружения
@@ -92,7 +93,42 @@ func (b *MCPLSPBridge) NormalizeURIForLSP(uri string) string {
 		return utils.NormalizeURI(mappedPath)
 	}
 
+	// Fallback: try to find a matching file by stripping unknown path prefixes.
+	// This handles cases where callers pass paths with wrong roots
+	// (e.g. /workspace/do-project/... instead of /projects/...).
+	if resolved := b.resolveUnknownPath(slash); resolved != "" {
+		logger.Info(fmt.Sprintf("NormalizeURIForLSP: resolved unknown path %s → %s", slash, resolved))
+		return utils.NormalizeURI(resolved)
+	}
+
 	return normalized
+}
+
+// resolveUnknownPath tries to find a file under the container root by testing
+// progressively shorter suffixes of the given path.
+// Example: /workspace/do-project/do-extension-ame/Module.bsl
+//
+//	→ tries /projects/workspace/do-project/do-extension-ame/Module.bsl  (no)
+//	→ tries /projects/do-project/do-extension-ame/Module.bsl            (no)
+//	→ tries /projects/do-extension-ame/Module.bsl                       (yes!) → returns it
+func (b *MCPLSPBridge) resolveUnknownPath(slashPath string) string {
+	if b.pathMapper == nil {
+		return ""
+	}
+	cr := b.pathMapper.ContainerRoot()
+
+	// Strip leading slash for splitting
+	trimmed := strings.TrimPrefix(slashPath, "/")
+	parts := strings.Split(trimmed, "/")
+
+	// Try dropping leading path components one at a time
+	for i := 0; i < len(parts)-1; i++ {
+		candidate := cr + "/" + strings.Join(parts[i:], "/")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func (b *MCPLSPBridge) IsAllowedDirectory(path string) (string, error) {
@@ -169,8 +205,12 @@ func (b *MCPLSPBridge) validateAndConnectClient(language string, serverConfig ty
 			}
 			// Session Manager is already initialized - skip the initialize phase below
 			adapter.SetProjectRoots([]string{dir})
+			serverName := b.config.GetServerNameFromLanguage(types.Language(language))
+			if serverName == "" {
+				serverName = types.LanguageServer(language)
+			}
 			b.mu.Lock()
-			b.clients[types.LanguageServer(language)] = adapter
+			b.clients[serverName] = adapter
 			b.mu.Unlock()
 			logger.Info("Connected to LSP Session Manager for language: " + language)
 			return adapter, nil
@@ -694,8 +734,18 @@ func (b *MCPLSPBridge) GetHoverInformation(uri string, line, character uint32) (
 }
 
 // ensureDocumentOpen sends a textDocument/didOpen notification to the language server
-// This is often required before other document operations can be performed
+// This is often required before other document operations can be performed.
+// It tracks already-opened documents to avoid sending duplicate didOpen notifications.
 func (b *MCPLSPBridge) ensureDocumentOpen(client types.LanguageClientInterface, uri, language string) error {
+	// Check if already opened — LSP protocol forbids duplicate didOpen for the same URI.
+	b.openedDocumentsMu.RLock()
+	if b.openedDocuments[uri] {
+		b.openedDocumentsMu.RUnlock()
+		logger.Debug(fmt.Sprintf("ensureDocumentOpen: document already open: %s", uri))
+		return nil
+	}
+	b.openedDocumentsMu.RUnlock()
+
 	// Read the file content. Accept file URI or raw path.
 	// If running in container mode, map host paths to container paths before any fs operations.
 	filePath := utils.URIToFilePath(uri)
@@ -767,6 +817,11 @@ func (b *MCPLSPBridge) ensureDocumentOpen(client types.LanguageClientInterface, 
 	if err != nil {
 		return fmt.Errorf("failed to send didOpen notification: %w", err)
 	}
+
+	// Mark as opened to prevent duplicate didOpen notifications.
+	b.openedDocumentsMu.Lock()
+	b.openedDocuments[uri] = true
+	b.openedDocumentsMu.Unlock()
 
 	logger.Debug(fmt.Sprintf("Document opened in LSP server: %s (language: %s)", uri, language))
 
@@ -1287,7 +1342,49 @@ func (b *MCPLSPBridge) DidChangeWatchedFiles(language string, changes []protocol
 		return fmt.Errorf("failed to get client for language %s: %w", language, err)
 	}
 
-	return client.DidChangeWatchedFiles(changes)
+	// Send the workspace notification first.
+	if err := client.DidChangeWatchedFiles(changes); err != nil {
+		return err
+	}
+
+	// For Changed (2) and Created (1) events, force the LSP to reload the document
+	// by sending didClose + didOpen. Without this, the LSP keeps the stale in-memory
+	// version and diagnostics/symbols won't reflect the new file content.
+	for _, change := range changes {
+		if change.Type == protocol.FileChangeTypeDeleted {
+			// For deleted files, just remove from tracking.
+			uri := string(change.Uri)
+			b.openedDocumentsMu.Lock()
+			delete(b.openedDocuments, uri)
+			b.openedDocumentsMu.Unlock()
+			continue
+		}
+
+		uri := string(change.Uri)
+		normalizedURI := b.NormalizeURIForLSP(uri)
+
+		// Close the document if it was previously opened, so the LSP drops its stale version.
+		b.openedDocumentsMu.RLock()
+		wasOpen := b.openedDocuments[uri] || b.openedDocuments[normalizedURI]
+		b.openedDocumentsMu.RUnlock()
+
+		if wasOpen {
+			if closeErr := client.DidClose(normalizedURI); closeErr != nil {
+				logger.Warn(fmt.Sprintf("DidChangeWatchedFiles: didClose failed for %s: %v", uri, closeErr))
+			}
+			b.openedDocumentsMu.Lock()
+			delete(b.openedDocuments, uri)
+			delete(b.openedDocuments, normalizedURI)
+			b.openedDocumentsMu.Unlock()
+		}
+
+		// Re-open the document so the LSP reads the fresh content from disk.
+		if openErr := b.ensureDocumentOpen(client, normalizedURI, language); openErr != nil {
+			logger.Warn(fmt.Sprintf("DidChangeWatchedFiles: didOpen failed for %s: %v", uri, openErr))
+		}
+	}
+
+	return nil
 }
 
 // DidChangeConfiguration sends workspace/didChangeConfiguration notification.

@@ -40,10 +40,15 @@ RUN mkdir -p /opt/bsl-ls \
 # === Final stage ===
 FROM debian:bookworm-slim
 
-# Install xz-utils first for unpacking s6-overlay, then other packages
-# Also install locales for UTF-8 support (critical for Cyrillic filenames and content)
+# Install base packages and locales for UTF-8 support (critical for Cyrillic filenames and content)
+# Java 21 (Temurin/Adoptium) is required by BSL LS >= 0.29
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends xz-utils ca-certificates openjdk-17-jre-headless procps netcat-openbsd locales \
+  && apt-get install -y --no-install-recommends xz-utils ca-certificates procps netcat-openbsd locales wget gnupg \
+  && wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
+  && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends temurin-21-jre \
+  && apt-get purge -y --auto-remove wget gnupg \
   && rm -rf /var/lib/apt/lists/* \
   && sed -i '/ru_RU.UTF-8/s/^# //g' /etc/locale.gen \
   && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
@@ -106,8 +111,12 @@ ENV LC_ALL=ru_RU.UTF-8
 
 WORKDIR /home/user
 
-# s6-overlay as init - manages lsp-proxy daemon
+# HTTP port for MCP Streamable HTTP transport (used when MCP_TRANSPORT=http)
+EXPOSE 8080
+
+# s6-overlay as init - manages lsp-proxy daemon and mcp-bridge-http service
 ENTRYPOINT ["/init"]
 
-# Container stays alive, MCP calls via `docker exec ... mcp-lsp-bridge`
+# Container stays alive, MCP calls via `docker exec ... mcp-lsp-bridge` (stdio)
+# or via HTTP when MCP_TRANSPORT=http (served by s6 mcp-bridge-http service)
 CMD ["sleep", "infinity"]

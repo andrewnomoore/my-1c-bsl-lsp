@@ -15,7 +15,17 @@ import (
 
 func DidChangeWatchedFilesTool(bridge interfaces.BridgeInterface) (mcp.Tool, server.ToolHandlerFunc) {
 	return mcp.NewTool("did_change_watched_files",
-			mcp.WithDescription("Notify the language server about file changes (workspace/didChangeWatchedFiles). Use when external tools modify files outside didOpen/didChange flow."),
+			mcp.WithDescription(`Notify the language server about file changes and force document re-indexing.
+
+For Created (type=1) and Changed (type=2) events, the bridge automatically:
+1. Sends workspace/didChangeWatchedFiles notification
+2. Closes stale documents (didClose)
+3. Re-opens them with fresh content from disk (didOpen)
+
+This ensures diagnostics, symbols, and hover reflect the latest file content.
+
+USAGE: language="bsl", changes_json='[{"uri":"file:///projects/path/file.bsl","type":2}]'
+Types: 1=Created, 2=Changed, 3=Deleted`),
 			mcp.WithDestructiveHintAnnotation(false),
 			mcp.WithString("language", mcp.Description("Language server ID (e.g., 'bsl')."), mcp.Required()),
 			mcp.WithString("changes_json", mcp.Description("JSON array of file events: [{\"uri\":\"file:///path\",\"type\":1}]. type: 1=Created, 2=Changed, 3=Deleted."), mcp.Required()),

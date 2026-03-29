@@ -1,4 +1,4 @@
-# 🚀 my-1c-bsl-lsp
+# 🚀 bsl-mcp-bridge v2.0
 
 > 👨‍💻 Реализовал: **Сухов Андрей Евгеньевич** совместно с **Claude Opus 4.6** (Anthropic)
 >
